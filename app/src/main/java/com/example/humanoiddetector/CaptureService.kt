@@ -13,6 +13,8 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
+import android.util.DisplayMetrics
+import android.view.Display
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -52,6 +54,7 @@ class CaptureService : Service() {
     private var screenWidth = 0
     private var screenHeight = 0
     private var lastFrameMs = 0L
+    private var displayListener: DisplayManager.DisplayListener? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -124,17 +127,35 @@ class CaptureService : Service() {
         }
 
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = resources.displayMetrics
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-
-        // Capture at 75% resolution to keep detection fast.
-        val captureWidth = (screenWidth * 0.75f).toInt()
-        val captureHeight = (screenHeight * 0.75f).toInt()
+        val (w, h) = currentDisplaySize()
+        screenWidth = w
+        screenHeight = h
 
         captureThread = HandlerThread("CaptureThread").also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
 
+        setupCapture()
+        registerRotationListener()
+        showOverlay()
+        isRunning = true
+    }
+
+    /** Current physical display size (updates with rotation). */
+    private fun currentDisplaySize(): Pair<Int, Int> {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val display = dm.getDisplay(Display.DEFAULT_DISPLAY) ?: return Pair(0, 0)
+        val metrics = DisplayMetrics()
+        display.getRealMetrics(metrics)
+        return Pair(metrics.widthPixels, metrics.heightPixels)
+    }
+
+    /** (Re)creates the ImageReader + VirtualDisplay for the current screen size.
+     *  Called on start and again whenever the device rotates. */
+    private fun setupCapture() {
+        val captureWidth = (screenWidth * 0.75f).toInt()
+        val captureHeight = (screenHeight * 0.75f).toInt()
+
+        imageReader?.close()
         imageReader = ImageReader.newInstance(
             captureWidth, captureHeight, PixelFormat.RGBA_8888, 2
         )
@@ -144,6 +165,7 @@ class CaptureService : Service() {
             image.close()
         }, captureHandler)
 
+        virtualDisplay?.release()
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "HumanoidDetector",
             captureWidth,
@@ -154,9 +176,28 @@ class CaptureService : Service() {
             null,
             captureHandler
         )
+        Log.i(TAG, "Capture resized to ${captureWidth}x$captureHeight")
+    }
 
-        showOverlay()
-        isRunning = true
+    /** Recreates the capture pipeline whenever the screen rotates. */
+    private fun registerRotationListener() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayListener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != Display.DEFAULT_DISPLAY) return
+                val (w, h) = currentDisplaySize()
+                if (w == 0 || h == 0) return
+                if (w != screenWidth || h != screenHeight) {
+                    Log.i(TAG, "Rotation detected: ${screenWidth}x$screenHeight -> ${w}x$h")
+                    screenWidth = w
+                    screenHeight = h
+                    captureHandler?.post { setupCapture() }
+                }
+            }
+        }
+        dm.registerDisplayListener(displayListener, captureHandler)
     }
 
     private fun processImage(image: Image) {
@@ -232,6 +273,11 @@ class CaptureService : Service() {
         captureThread = null
         detector?.close()
         detector = null
+        displayListener?.let {
+            (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
+                .unregisterDisplayListener(it)
+        }
+        displayListener = null
         super.onDestroy()
     }
 }
