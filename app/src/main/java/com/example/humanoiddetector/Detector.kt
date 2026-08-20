@@ -134,53 +134,41 @@ class Detector(private val context: Context) {
     fun detect(bitmap: Bitmap): List<PoseResult> {
         val pl = poseLandmarker ?: return emptyList()
         val toProcess = upscaleIfSmall(bitmap)
-        try {
-            val mpImage: MPImage = BitmapImageBuilder(toProcess).build()
-            return runPose(pl, mpImage, toProcess)
-            // mpImage unused below: passed via runPose param
-        } finally {
-            if (toProcess !== bitmap) toProcess.recycle()
-        }
-    }
-
-    private fun upscaleIfSmall(src: Bitmap): Bitmap {
-        val longEdge = maxOf(src.width, src.height)
-        if (longEdge >= MIN_DETECTION_EDGE_PX || upscaleFactor <= 1.0f) return src
-        // scale so long edge reaches MIN_DETECTION_EDGE_PX (cap at 2x to limit cost)
-        val targetFactor = (MIN_DETECTION_EDGE_PX.toFloat() / longEdge).coerceAtMost(2.0f)
-        val factor = max(upscaleFactor, targetFactor)
-        val nw = (src.width * factor).toInt()
-        val nh = (src.height * factor).toInt()
-        val scaled = Bitmap.createScaledBitmap(src, nw, nh, true)
-        Log.i(TAG, "Upscaled ${src.width}x${src.height} -> ${nw}x${nh} (factor ${"%.2f".format(factor)})")
-        return scaled
-    }
-
-    private fun runPose(pl: PoseLandmarker, image: MPImage, bmp: Bitmap): List<PoseResult> {
+        val mpImage: MPImage = BitmapImageBuilder(toProcess).build()
         val result: PoseLandmarkerResult = try {
-            pl.detect(image)
+            pl.detect(mpImage)
         } catch (e: Exception) {
             Log.e(TAG, "pose detect failed", e)
             return emptyList()
         }
-
         val out = mutableListOf<PoseResult>()
         for (landmarks in result.landmarks()) {
             val joints = FloatArray(landmarks.size * 2)
             val vis = FloatArray(landmarks.size)
             for (i in 0 until landmarks.size) {
                 val l = landmarks[i]
-                joints[i * 2] = l.x() * bmp.width
-                joints[i * 2 + 1] = l.y() * bmp.height
+                joints[i * 2] = l.x() * toProcess.width
+                joints[i * 2 + 1] = l.y() * toProcess.height
                 vis[i] = l.visibility().orElse(0f)
             }
-
             val emphasized = colorFilterEnabled &&
-                centerPixelMatches(bmp, joints)
-
+                centerPixelMatches(toProcess, joints)
             out.add(PoseResult(joints, vis, emphasized))
         }
+        if (toProcess !== bitmap) toProcess.recycle()
         return out
+    }
+
+    private fun upscaleIfSmall(src: Bitmap): Bitmap {
+        val longEdge = maxOf(src.width, src.height)
+        if (longEdge >= MIN_DETECTION_EDGE_PX || upscaleFactor <= 1.0f) return src
+        val targetFactor = (MIN_DETECTION_EDGE_PX.toFloat() / longEdge).coerceAtMost(2.0f)
+        val factor = max(upscaleFactor, targetFactor)
+        val nw = (src.width * factor).toInt()
+        val nh = (src.height * factor).toInt()
+        val scaled = Bitmap.createScaledBitmap(src, nw, nh, true)
+        Log.i(TAG, "Upscaled ${src.width}x${src.height} -> ${nw}x${nh}")
+        return scaled
     }
 
     /** Center pixel of the torso (avg of shoulders+hips) must match hue target. */
