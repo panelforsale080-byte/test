@@ -17,7 +17,7 @@ class OverlayView(context: Context) : View(context) {
 
     /** Visibility threshold before a joint is dropped from the drawing. */
     @Volatile
-    var jointMinVisibility: Float = 0.5f
+    var jointMinVisibility: Float = 0.3f
 
     private val bonePaint = Paint().apply {
         style = Paint.Style.STROKE

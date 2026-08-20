@@ -52,9 +52,9 @@ class Detector(private val context: Context) {
     companion object {
         private const val TAG = "Detector"
         private const val MODEL = "pose_landmarker_lite.task"
-        private const val MIN_POSE_DETECTION_CONFIDENCE = 0.3f
-        private const val MIN_PRESENCE_CONFIDENCE = 0.3f
-        private const val MIN_TRACKING_CONFIDENCE = 0.3f
+        private const val MIN_POSE_DETECTION_CONFIDENCE = 0.15f
+        private const val MIN_PRESENCE_CONFIDENCE = 0.15f
+        private const val MIN_TRACKING_CONFIDENCE = 0.2f
 
         /** Optional secondary HSV color filter (disabled by default). */
         @Volatile
@@ -112,7 +112,7 @@ class Detector(private val context: Context) {
             .setMinPoseDetectionConfidence(MIN_POSE_DETECTION_CONFIDENCE)
             .setMinPosePresenceConfidence(MIN_PRESENCE_CONFIDENCE)
             .setMinTrackingConfidence(MIN_TRACKING_CONFIDENCE)
-            .setNumPoses(3)
+            .setNumPoses(5)
             .build()
         PoseLandmarker.createFromOptions(context, options)
     } catch (e: Exception) {
@@ -120,9 +120,42 @@ class Detector(private val context: Context) {
         null
     }
 
+    /**
+     * Minimum long-edge for reliable distant-figure detection.
+     * If the input is smaller than this we upscale it before running MediaPipe
+     * so small/distant humanoids are not lost in the model's 256x256 input grid.
+     */
+    private val MIN_DETECTION_EDGE_PX = 960
+
+    /** Optional upscale factor passed to detect(); 1.0 = no upscale. */
+    @Volatile
+    var upscaleFactor: Float = 1.0f
+
     fun detect(bitmap: Bitmap): List<PoseResult> {
         val pl = poseLandmarker ?: return emptyList()
-        val mpImage: MPImage = BitmapImageBuilder(bitmap).build()
+        val toProcess = upscaleIfSmall(bitmap)
+        try {
+            val mpImage: MPImage = BitmapImageBuilder(toProcess).build()
+            return runPose(pl, mpImage, toProcess)
+        } finally {
+            if (toProcess !== bitmap) toProcess.recycle()
+        }
+    }
+
+    private fun upscaleIfSmall(src: Bitmap): Bitmap {
+        val longEdge = maxOf(src.width, src.height)
+        if (longEdge >= MIN_DETECTION_EDGE_PX || upscaleFactor <= 1.0f) return src
+        // scale so long edge reaches MIN_DETECTION_EDGE_PX (cap at 2x to limit cost)
+        val targetFactor = (MIN_DETECTION_EDGE_PX.toFloat() / longEdge).coerceAtMost(2.0f)
+        val factor = max(upscaleFactor, targetFactor)
+        val nw = (src.width * factor).toInt()
+        val nh = (src.height * factor).toInt()
+        val scaled = Bitmap.createScaledBitmap(src, nw, nh, true)
+        Log.i(TAG, "Upscaled ${src.width}x${src.height} -> ${nw}x${nh} (factor ${"%.2f".format(factor)})")
+        return scaled
+    }
+
+    private fun runPose(pl: PoseLandmarker, image: MPImage, bmp: Bitmap): List<PoseResult> {
         val result: PoseLandmarkerResult = try {
             pl.detect(mpImage)
         } catch (e: Exception) {
@@ -136,13 +169,13 @@ class Detector(private val context: Context) {
             val vis = FloatArray(landmarks.size)
             for (i in 0 until landmarks.size) {
                 val l = landmarks[i]
-                joints[i * 2] = l.x() * bitmap.width
-                joints[i * 2 + 1] = l.y() * bitmap.height
+                joints[i * 2] = l.x() * bmp.width
+                joints[i * 2 + 1] = l.y() * bmp.height
                 vis[i] = l.visibility().orElse(0f)
             }
 
             val emphasized = colorFilterEnabled &&
-                centerPixelMatches(bitmap, joints)
+                centerPixelMatches(bmp, joints)
 
             out.add(PoseResult(joints, vis, emphasized))
         }

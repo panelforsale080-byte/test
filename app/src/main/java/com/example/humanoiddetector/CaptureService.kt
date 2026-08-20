@@ -50,6 +50,7 @@ class CaptureService : Service() {
     private var captureHandler: Handler? = null
     private var overlay: OverlayView? = null
     private var detector: Detector? = null
+    private var tracker: PoseTracker? = null
     private var windowManager: WindowManager? = null
     private var screenWidth = 0
     private var screenHeight = 0
@@ -134,6 +135,8 @@ class CaptureService : Service() {
         captureThread = HandlerThread("CaptureThread").also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
 
+        tracker = PoseTracker()
+
         setupCapture()
         registerRotationListener()
         showOverlay()
@@ -209,18 +212,20 @@ class CaptureService : Service() {
         val bitmap = imageToBitmap(image) ?: return
         val poses = detector?.detect(bitmap) ?: emptyList()
 
-        // Map capture-space joints back to full screen coordinates.
+        // Map capture-space joints back to full screen / overlay coordinates.
         val scaleX = screenWidth.toFloat() / bitmap.width
         val scaleY = screenHeight.toFloat() / bitmap.height
         val mapped = poses.map { p ->
             val scaled = FloatArray(p.joints.size)
-            for (i in 0 until p.joints.size step 2) {
+            for (i in p.joints.indices step 2) {
                 scaled[i] = p.joints[i] * scaleX
                 scaled[i + 1] = p.joints[i + 1] * scaleY
             }
             PoseResult(scaled, p.visibility, p.emphasized)
         }
-        overlay?.postPoses(mapped)
+        // Smooth + track across frames so overlay does not flicker
+        val smooth = tracker?.update(mapped, screenWidth, screenHeight) ?: mapped
+        overlay?.postPoses(smooth)
         bitmap.recycle()
     }
 
@@ -273,6 +278,8 @@ class CaptureService : Service() {
         captureThread = null
         detector?.close()
         detector = null
+        tracker?.reset()
+        tracker = null
         displayListener?.let {
             (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager)
                 .unregisterDisplayListener(it)
