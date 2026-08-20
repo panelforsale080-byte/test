@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Humanoid Detector</string>
+    <string name="status_running">Detection running — boxes drawn over people</string>
+    <string name="status_stopped">Not running</string>
+    <string name="grant_overlay">Grant overlay permission</string>
+    <string name="start_detection">Start detection</string>
+    <string name="stop_detection">Stop detection</string>
+    <string name="need_overlay">Please grant the overlay permission first</string>
+    <string name="overlay_granted">Overlay permission already granted</string>
+    <string name="projection_denied">Screen capture permission was denied</string>
+    <string name="notification_title">Humanoid Detector active</string>
+    <string name="notification_text">Detecting people on screen — detection only, no input is injected</string>
+    <string name="notification_channel">Screen detection</string>
+</resources>
