@@ -7,33 +7,56 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 
-/** A single detected person, in capture-frame coordinates (0..1 scaled later). */
-data class DetectionResult(
-    val left: Float,
-    val top: Float,
-    val right: Float,
-    val bottom: Float,
-    val label: String,
-    val score: Float,
+/** A single detected pose: 33 joints in capture-frame coordinates (px). */
+data class PoseResult(
+    val joints: FloatArray,
+    val visibility: FloatArray,
     val emphasized: Boolean
+) {
+    /** Returns the joint at index i as (x, y, visibility). */
+    fun joint(i: Int): Triple<Float, Float, Float> =
+        Triple(joints[i * 2], joints[i * 2 + 1], visibility[i])
+}
+
+/** MediaPipe 33-landmark skeleton (BlazePose).
+ *  Pairs are (jointA, jointB) for each drawn line segment. */
+val SKELETON_CONNECTIONS: List<Pair<Int, Int>> = listOf(
+    // face
+    0 to 1, 1 to 2, 2 to 3, 3 to 7,           // nose → left eye → ear
+    0 to 4, 4 to 5, 5 to 6, 6 to 8,           // nose → right eye → ear
+    // shoulders / arms
+    9 to 10,                                  // mouth
+    11 to 12,                                 // shoulder bridge
+    11 to 13, 13 to 15, 15 to 17, 17 to 19, 19 to 15, 15 to 21,  // left arm + hand
+    12 to 14, 14 to 16, 16 to 18, 18 to 20, 20 to 16, 16 to 22,  // right arm + hand
+    // torso / hips
+    11 to 23, 12 to 24, 23 to 24,             // torso + hip bridge
+    // legs
+    23 to 25, 25 to 27, 27 to 29, 27 to 31, 29 to 31,  // left leg + foot
+    24 to 26, 26 to 28, 28 to 30, 28 to 32, 30 to 32,  // right leg + foot
 )
 
 /**
- * Wraps MediaPipe ObjectDetector (efficientdet_lite0) and keeps only "person"
- * detections. An optional secondary HSV color filter can highlight people whose
- * center pixel falls inside a chosen hue range — useful to focus on one target.
+ * PoseLandmarker wrapper. Tries each frame and returns a list of all detected
+ * poses (each pose = 33 joints x/y + visibility).
+ *
+ * Detection strength note: pose models handle small/distant figures MUCH better
+ * than the previous object detector's "is there a person-shaped blob" check,
+ * because they key on shoulders/hips specifically.
  */
 class Detector(private val context: Context) {
 
     companion object {
         private const val TAG = "Detector"
-        private const val MODEL = "efficientdet_lite0.tflite"
-        private const val MIN_SCORE = 0.45f
-        private const val PERSON_LABEL = "person"
+        private const val MODEL = "pose_landmarker_lite.task"
+        private const val MIN_POSE_DETECTION_CONFIDENCE = 0.3f
+        private const val MIN_PRESENCE_CONFIDENCE = 0.3f
+        private const val MIN_TRACKING_CONFIDENCE = 0.3f
 
-        /** Optional secondary color filter (disabled by default). */
+        /** Optional secondary HSV color filter (disabled by default). */
         @Volatile
         var colorFilterEnabled = false
         @Volatile
@@ -42,97 +65,121 @@ class Detector(private val context: Context) {
         var hueTolerance = 15f
     }
 
-    private val objectDetector: ObjectDetector? = try {
+    // Indexed by joint id, body-part name for human-readable labels.
+    val jointNames: Array<String> = arrayOf(
+        "nose",           // 0
+        "l_eye_inner",    // 1
+        "l_eye",          // 2
+        "l_eye_outer",    // 3
+        "r_eye_inner",    // 4
+        "r_eye",          // 5
+        "r_eye_outer",    // 6
+        "l_ear",          // 7
+        "r_ear",          // 8
+        "mouth_l",        // 9
+        "mouth_r",        // 10
+        "l_shoulder",     // 11
+        "r_shoulder",     // 12
+        "l_elbow",        // 13
+        "r_elbow",        // 14
+        "l_wrist",        // 15
+        "r_wrist",        // 16
+        "l_pinky",        // 17
+        "r_pinky",        // 18
+        "l_index",        // 19
+        "r_index",        // 20
+        "l_thumb",        // 21
+        "r_thumb",        // 22
+        "l_hip",          // 23
+        "r_hip",          // 24
+        "l_knee",         // 25
+        "r_knee",         // 26
+        "l_ankle",        // 27
+        "r_ankle",        // 28
+        "l_heel",         // 29
+        "r_heel",         // 30
+        "l_foot_index",   // 31
+        "r_foot_index"    // 32
+    )
+
+    private val poseLandmarker: PoseLandmarker? = try {
         val baseOptions = BaseOptions.builder()
             .setModelAssetPath(MODEL)
             .build()
-        val options = ObjectDetector.ObjectDetectorOptions.builder()
+        val options = PoseLandmarker.PoseLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.IMAGE)
-            .setScoreThreshold(MIN_SCORE)
+            .setMinPoseDetectionConfidence(MIN_POSE_DETECTION_CONFIDENCE)
+            .setMinPosePresenceConfidence(MIN_PRESENCE_CONFIDENCE)
+            .setMinTrackingConfidence(MIN_TRACKING_CONFIDENCE)
+            .setNumPoses(3)
             .build()
-        ObjectDetector.createFromOptions(context, options)
+        PoseLandmarker.createFromOptions(context, options)
     } catch (e: Exception) {
-        Log.e(TAG, "Failed to create ObjectDetector", e)
+        Log.e(TAG, "Failed to create PoseLandmarker", e)
         null
     }
 
-    fun detect(bitmap: Bitmap): List<DetectionResult> {
-        val detector = objectDetector ?: return emptyList()
+    fun detect(bitmap: Bitmap): List<PoseResult> {
+        val pl = poseLandmarker ?: return emptyList()
         val mpImage: MPImage = BitmapImageBuilder(bitmap).build()
-        val result = detector.detect(mpImage)
-        val results = mutableListOf<DetectionResult>()
+        val result: PoseLandmarkerResult = try {
+            pl.detect(mpImage)
+        } catch (e: Exception) {
+            Log.e(TAG, "pose detect failed", e)
+            return emptyList()
+        }
 
-        for (detection in result.detections()) {
-            val category = detection.categories().firstOrNull() ?: continue
-            val label = category.categoryName() ?: continue
-            if (label != PERSON_LABEL) continue
-
-            val box = detection.boundingBox()
-            val left = box.left
-            val top = box.top
-            val right = box.right
-            val bottom = box.bottom
-            val score = category.score()
+        val out = mutableListOf<PoseResult>()
+        for (landmarks in result.landmarks()) {
+            val joints = FloatArray(landmarks.size * 2)
+            val vis = FloatArray(landmarks.size)
+            for (i in 0 until landmarks.size) {
+                val l = landmarks[i]
+                joints[i * 2] = l.x() * bitmap.width
+                joints[i * 2 + 1] = l.y() * bitmap.height
+                vis[i] = l.visibility().orElse(0f)
+            }
 
             val emphasized = colorFilterEnabled &&
-                matchesColor(bitmap, left.toInt(), top.toInt(), right.toInt(), bottom.toInt())
+                centerPixelMatches(bitmap, joints)
 
-            results.add(
-                DetectionResult(
-                    left = left,
-                    top = top,
-                    right = right,
-                    bottom = bottom,
-                    label = label,
-                    score = score,
-                    emphasized = emphasized
-                )
-            )
+            out.add(PoseResult(joints, vis, emphasized))
         }
-        return results
+        return out
     }
 
-    /** Samples the center pixel of the box and checks it against the HSV target. */
-    private fun matchesColor(
-        bitmap: Bitmap,
-        left: Int,
-        top: Int,
-        right: Int,
-        bottom: Int
-    ): Boolean {
-        val w = (right - left).coerceAtLeast(1)
-        val h = (bottom - top).coerceAtLeast(1)
-        val sampleX = (left + w / 2).coerceIn(0, bitmap.width - 1)
-        val sampleY = (top + h / 2).coerceIn(0, bitmap.height - 1)
-        val pixel = bitmap.getPixel(sampleX, sampleY)
-
+    /** Center pixel of the torso (avg of shoulders+hips) must match hue target. */
+    private fun centerPixelMatches(bitmap: Bitmap, joints: FloatArray): Boolean {
+        val idxShoulderL = 11; val idxShoulderR = 12
+        val idxHipL = 23; val idxHipR = 24
+        val cx = ((joints[idxShoulderL * 2] + joints[idxShoulderR * 2] +
+            joints[idxHipL * 2] + joints[idxHipR * 2]) / 4f).toInt()
+                .coerceIn(0, bitmap.width - 1)
+        val cy = ((joints[idxShoulderL * 2 + 1] + joints[idxShoulderR * 2 + 1] +
+            joints[idxHipL * 2 + 1] + joints[idxHipR * 2 + 1]) / 4f).toInt()
+                .coerceIn(0, bitmap.height - 1)
+        val pixel = bitmap.getPixel(cx, cy)
         val r = (pixel shr 16) and 0xFF
         val g = (pixel shr 8) and 0xFF
         val b = pixel and 0xFF
         val (hue, sat, _) = rgbToHsv(r, g, b)
-
         if (sat < 0.25f) return false
-        var diff = Math.abs(hue - hueTarget)
-        if (diff > 180f) diff = 360f - diff
+        var diff = Math.abs(hue - hueTarget); if (diff > 180f) diff = 360f - diff
         return diff <= hueTolerance
     }
 
     private fun rgbToHsv(r: Int, g: Int, b: Int): Triple<Float, Float, Float> {
-        val rf = r / 255f
-        val gf = g / 255f
-        val bf = b / 255f
-        val max = maxOf(rf, gf, bf)
-        val min = minOf(rf, gf, bf)
-        val d = max - min
+        val rf = r / 255f; val gf = g / 255f; val bf = b / 255f
+        val max = maxOf(rf, gf, bf); val min = minOf(rf, gf, bf)
         val v = max
-        val s = if (max == 0f) 0f else d / max
+        val s = if (max == 0f) 0f else (max - min) / max
         var h = 0f
-        if (d != 0f) {
+        if (max != min) {
             h = when (max) {
-                rf -> ((gf - bf) / d) % 6f
-                gf -> (bf - rf) / d + 2f
-                else -> (rf - gf) / d + 4f
+                rf -> ((gf - bf) / (max - min)) % 6f
+                gf -> ((bf - rf) / (max - min)) + 2f
+                else -> ((rf - gf) / (max - min)) + 4f
             }
             h *= 60f
             if (h < 0f) h += 360f
@@ -141,6 +188,6 @@ class Detector(private val context: Context) {
     }
 
     fun close() {
-        objectDetector?.close()
+        poseLandmarker?.close()
     }
 }

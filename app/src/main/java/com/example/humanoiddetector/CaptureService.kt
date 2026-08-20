@@ -166,23 +166,20 @@ class CaptureService : Service() {
         lastFrameMs = now
 
         val bitmap = imageToBitmap(image) ?: return
-        val detections = detector?.detect(bitmap) ?: emptyList()
+        val poses = detector?.detect(bitmap) ?: emptyList()
 
-        // Map capture-space boxes back to full screen coordinates.
+        // Map capture-space joints back to full screen coordinates.
         val scaleX = screenWidth.toFloat() / bitmap.width
         val scaleY = screenHeight.toFloat() / bitmap.height
-        val mapped = detections.map { d ->
-            DetectionResult(
-                left = d.left * scaleX,
-                top = d.top * scaleY,
-                right = d.right * scaleX,
-                bottom = d.bottom * scaleY,
-                label = d.label,
-                score = d.score,
-                emphasized = d.emphasized
-            )
+        val mapped = poses.map { p ->
+            val scaled = FloatArray(p.joints.size)
+            for (i in 0 until p.joints.size step 2) {
+                scaled[i] = p.joints[i] * scaleX
+                scaled[i + 1] = p.joints[i + 1] * scaleY
+            }
+            PoseResult(scaled, p.visibility, p.emphasized)
         }
-        overlay?.postDetections(mapped)
+        overlay?.postPoses(mapped)
         bitmap.recycle()
     }
 

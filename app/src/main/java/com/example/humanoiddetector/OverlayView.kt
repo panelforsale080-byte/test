@@ -8,46 +8,85 @@ import android.view.View
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * A transparent, non-touchable overlay that draws bounding boxes around every
- * detected person. It only draws — it never receives or injects touches.
+ * Transparent, non-touchable overlay that draws a thin 33-joint skeleton over
+ * each detected body. Only draws — never receives or injects touches.
  */
 class OverlayView(context: Context) : View(context) {
 
-    private val detections = CopyOnWriteArrayList<DetectionResult>()
+    private val poses = CopyOnWriteArrayList<PoseResult>()
 
-    private val boxPaint = Paint().apply {
+    /** Visibility threshold before a joint is dropped from the drawing. */
+    @Volatile
+    var jointMinVisibility: Float = 0.5f
+
+    private val bonePaint = Paint().apply {
         style = Paint.Style.STROKE
-        strokeWidth = 6f * resources.displayMetrics.density
+        strokeWidth = 2.5f * resources.displayMetrics.density   // thin
+        strokeCap = Paint.Cap.ROUND
         color = Color.rgb(0, 200, 255)
         isAntiAlias = true
     }
 
-    private val emphasizePaint = Paint().apply {
+    private val boneEmphPaint = Paint().apply {
         style = Paint.Style.STROKE
-        strokeWidth = 6f * resources.displayMetrics.density
+        strokeWidth = 2.5f * resources.displayMetrics.density
+        strokeCap = Paint.Cap.ROUND
+        color = Color.rgb(255, 80, 80)
+        isAntiAlias = true
+    }
+
+    private val jointPaint = Paint().apply {
+        style = Paint.Style.FILL
+        color = Color.rgb(0, 200, 255)
+        isAntiAlias = true
+    }
+
+    private val jointEmphPaint = Paint().apply {
+        style = Paint.Style.FILL
         color = Color.rgb(255, 80, 80)
         isAntiAlias = true
     }
 
     private val labelPaint = Paint().apply {
         color = Color.WHITE
-        textSize = 14f * resources.displayMetrics.density
+        textSize = 11f * resources.displayMetrics.density
         isAntiAlias = true
     }
 
-    fun postDetections(list: List<DetectionResult>) {
-        detections.clear()
-        detections.addAll(list)
+    fun postPoses(list: List<PoseResult>) {
+        poses.clear()
+        poses.addAll(list)
         postInvalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        for (d in detections) {
-            val paint = if (d.emphasized) emphasizePaint else boxPaint
-            canvas.drawRect(d.left, d.top, d.right, d.bottom, paint)
-            val label = "${d.label} ${(d.score * 100).toInt()}%"
-            canvas.drawText(label, d.left, (d.top - 8f).coerceAtLeast(0f), labelPaint)
+        val r = jointMinVisibility
+        for (pose in poses) {
+            val bones = if (pose.emphasized) boneEmphPaint else bonePaint
+            val tips = if (pose.emphasized) jointEmphPaint else jointPaint
+
+            // draw bones first (under dots)
+            for ((a, b) in SKELETON_CONNECTIONS) {
+                if (pose.visibility[a] < r || pose.visibility[b] < r) continue
+                val ax = pose.joints[a * 2]
+                val ay = pose.joints[a * 2 + 1]
+                val bx = pose.joints[b * 2]
+                val by = pose.joints[b * 2 + 1]
+                canvas.drawLine(ax, ay, bx, by, bones)
+            }
+
+            // draw joints (small circles) on top
+            val radius = 3.5f * resources.displayMetrics.density
+            for (i in 0 until 33) {
+                if (pose.visibility[i] < r) continue
+                canvas.drawCircle(
+                    pose.joints[i * 2],
+                    pose.joints[i * 2 + 1],
+                    radius,
+                    tips
+                )
+            }
         }
     }
 }
