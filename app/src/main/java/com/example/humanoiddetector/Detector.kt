@@ -137,6 +137,7 @@ class Detector(private val context: Context) {
         try {
             val mpImage: MPImage = BitmapImageBuilder(toProcess).build()
             return runPose(pl, mpImage, toProcess)
+            // mpImage unused below: passed via runPose param
         } finally {
             if (toProcess !== bitmap) toProcess.recycle()
         }
@@ -157,7 +158,7 @@ class Detector(private val context: Context) {
 
     private fun runPose(pl: PoseLandmarker, image: MPImage, bmp: Bitmap): List<PoseResult> {
         val result: PoseLandmarkerResult = try {
-            pl.detect(mpImage)
+            pl.detect(image)
         } catch (e: Exception) {
             Log.e(TAG, "pose detect failed", e)
             return emptyList()
